@@ -32,7 +32,7 @@ CREATE DOMAIN color
 CREATE DOMAIN building_status 
 	AS character varying 
 	NOT NULL
-	CONSTRAINT building_status_in CHECK (VALUE IN ('Complete', 'In-Progress', 'H', 'Review'));
+	CONSTRAINT building_status_in CHECK (VALUE IN ('Complete', 'In-Progress', 'Pending', 'Review'));
 	
 CREATE DOMAIN job_status 
 	AS character varying 
