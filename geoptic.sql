@@ -9,7 +9,7 @@
        LC_COLLATE = 'en_AU.UTF-8'
        LC_CTYPE = 'en_AU.UTF-8'
        CONNECTION LIMIT = -1;*/
-     
+	   
 	   
 
 ------------------------------------------------------------------------------------------------------
@@ -32,7 +32,7 @@ CREATE DOMAIN color
 CREATE DOMAIN building_status 
 	AS character varying 
 	NOT NULL
-	CONSTRAINT building_status_in CHECK (VALUE IN ('Complete', 'In-Progress', 'Pending', 'Review'));
+	CONSTRAINT building_status_in CHECK (VALUE IN ('Complete', 'In-Progress', 'H', 'Review'));
 	
 CREATE DOMAIN job_status 
 	AS character varying 
@@ -120,24 +120,24 @@ CREATE TABLE specification
 
 CREATE TABLE cable_spec (
 	cable_id serial,
-	mode fibre_mode,
+	mode varchar(10),
 	diameter integer,
-	sheath cable_sheath,
-	nb_tube number_of_tubes,
-	nb_fibre number_of_fibres
+	sheath varchar(20),
+	nb_tube integer,
+	nb_fibre integer
 ) INHERITS (specification);
 
 ALTER TABLE cable_spec ADD PRIMARY KEY (sid);
 
--- Table: joint_spec
+-- Table: splice_closure_spec
 
--- DROP TABLE joint_spec CASCADE;
+-- DROP TABLE splice_closure_spec CASCADE;
 
-CREATE TABLE joint_spec (
-	joint_id serial
+CREATE TABLE splice_closure_spec (
+	splice_closure_id serial
 ) INHERITS (specification);
 
-ALTER TABLE joint_spec ADD PRIMARY KEY (sid);
+ALTER TABLE splice_closure_spec ADD PRIMARY KEY (sid);
 
 -- Table: patchpanel_spec
 
@@ -250,7 +250,7 @@ CREATE TABLE circuit (
 	a_end varchar(20),
 	b_end varchar(20),
 	customer varchar(20)
-) INHERITS (network_object);
+) INHERITS (network_edge_object);
 
 ALTER TABLE circuit ADD PRIMARY KEY (ouid);
 
@@ -282,9 +282,6 @@ A fibre Optic Cable is composed of thin filaments of glass through which light b
 -- DROP TABLE fibre_cable;
 
 CREATE TABLE fibre_cable (
-	nb_tube integer NOT NULL,
-	nb_fibre integer NOT NULL,
-	model varchar(20),
 	begin_measure integer,
 	end_measure integer,
 	serial_number varchar(20),
@@ -402,13 +399,14 @@ CREATE TABLE fibre_splice (
 	b_fibre_uid uuid NOT NULL, -- The fibre ID of the "B" fibre in the fibre_splice.
 	b_fibre_number integer NOT NULL, -- The fibre_number of the "B" strand in the fibre_splice.
 	fibre_loss float(8), -- The amount of signal lost at the fibre_splice
-	splice_type integer -- The type of splicing. Uses the splice_type domain.
+	splice_type integer, -- The type of splicing. Uses the splice_type domain.
+	splice_closure_uid uuid NOT NULL, -- The enclosure UID.
 ) INHERITS ("object");
 
 ALTER TABLE fibre_splice ADD PRIMARY KEY (ouid);
 ALTER TABLE fibre_splice ADD FOREIGN KEY (a_fibre_uid) REFERENCES fibre(ouid) ON DELETE RESTRICT;
 ALTER TABLE fibre_splice ADD FOREIGN KEY (b_fibre_uid) REFERENCES fibre(ouid) ON DELETE RESTRICT;
-
+ALTER TABLE fibre_splice ADD FOREIGN KEY (splice_closure_uid) REFERENCES splice_closure(ouid) ON DELETE RESTRICT;
 
 -- Table: patchpanel
 
@@ -422,17 +420,17 @@ CREATE TABLE patchpanel (
 
 ALTER TABLE patchpanel ADD PRIMARY KEY (ouid);
 
--- Table: joint
+-- Table: splice_closure
 
--- A Joint establishes a connection between two or more fibre cables.
+-- A splice_closure establishes a connection between two or more fibre cables.
 
--- DROP TABLE joint
+-- DROP TABLE splice_closure
 
-CREATE TABLE joint (
+CREATE TABLE spice_closure (
 	mount_type integer -- Type of mount. Uses the mount_type domain.
 ) INHERITS (network_junction_object);
 
-ALTER TABLE joint ADD PRIMARY KEY (ouid);
+ALTER TABLE spice_closure ADD PRIMARY KEY (ouid);
 
 CREATE TABLE chamber (
 	
@@ -594,8 +592,8 @@ CREATE OR REPLACE FUNCTION buffer_tube_insert() RETURNS trigger AS $buffer_tube_
 		nb_fibre integer;
 		i integer;
 	BEGIN
-		nb_tube = NEW.nb_tube;
-		nb_fibre = NEW.nb_fibre / nb_tube;
+		nb_tube = (SELECT cable_spec.nb_tube FROM cable_spec WHERE sid = NEW.cable_spec_uid);
+		nb_fibre = (SELECT cable_spec.nb_fibre FROM cable_spec WHERE sid = NEW.cable_spec_uid) / nb_tube;
 		i = 1;
 		LOOP
 			INSERT INTO buffer_tube (buffer_number, buffer_color, number_of_fibres, fibre_cable_uid) VALUES (i, i, nb_fibre, NEW.ouid);
@@ -605,6 +603,9 @@ CREATE OR REPLACE FUNCTION buffer_tube_insert() RETURNS trigger AS $buffer_tube_
 			END iF;
 		END LOOP;
         RETURN NEW;
+		
+		ANALYZE public.buffer_tube;
+		
     END;
 $buffer_tube_insert$ LANGUAGE plpgsql;
 
@@ -614,15 +615,26 @@ $buffer_tube_insert$ LANGUAGE plpgsql;
 CREATE OR REPLACE FUNCTION cable_insert_stamp() RETURNS trigger AS $cable_insert_stamp$
 	DECLARE
 		valid integer;
+		shape geometry;
+		distance integer;
     BEGIN
 		-- Check the ouid
         IF NEW.ouid IS NULL THEN
             NEW.ouid = uuid_generate_v1mc();
         END IF;
 		
+		-- Add length
+		shape = NEW.geom;
+		distance = (SELECT CAST(ST_LENGTH(shape) AS INTEGER));
+		
+		-- asign length
+		NEW.design_length = distance;
+		
+		
+		
 		------------ TRICKY PART ---------------------------------------
 		
-		valid = select 1 from "object" where ouid = NEW.ouid limit 1;
+		valid = (select 1 from "object" where ouid = NEW.ouid limit 1);
 		
 		-- Check the ouid
         IF valid = 1 THEN
@@ -638,6 +650,7 @@ CREATE OR REPLACE FUNCTION cable_insert_stamp() RETURNS trigger AS $cable_insert
 
         -- asign date
         NEW.date_created := current_timestamp;
+		
         RETURN NEW;
     END;
 $cable_insert_stamp$ LANGUAGE plpgsql;
@@ -665,13 +678,34 @@ CREATE OR REPLACE FUNCTION fibre_insert() RETURNS trigger AS $fibre_insert$
 			END iF;
 		END LOOP;
         RETURN NEW;
+		
+		ANALYZE public.fibre;
     END;
 $fibre_insert$ LANGUAGE plpgsql;
+
+
+-- ON CABLE_SPEC CUT...
+
+CREATE OR REPLACE FUNCTION spec_insert_stamp() RETURNS trigger AS $spec_insert_stamp$
+	BEGIN
+		-- Check the ouid
+        IF NEW.sid IS NULL THEN
+            NEW.sid = uuid_generate_v1mc();
+        END IF;
+
+        RETURN NEW;
+    END;
+$spec_insert_stamp$ LANGUAGE plpgsql;
 
 ------------------------------------------------------------------------------------------------------
 
 -- CREATE TRIGGER
 
+------------------------------------------------------------------------------------------------------
+
+CREATE TRIGGER spec_insert_stamp BEFORE INSERT ON cable_spec
+    FOR EACH ROW EXECUTE PROCEDURE spec_insert_stamp();
+	
 ------------------------------------------------------------------------------------------------------
 
 CREATE TRIGGER obj_insert_stamp BEFORE INSERT ON conduit
@@ -682,8 +716,8 @@ CREATE TRIGGER obj_update_stamp BEFORE UPDATE ON conduit
 	
 ------------------------------------------------------------------------------------------------------
 
-CREATE TRIGGER obj_insert_stamp BEFORE INSERT ON fibre_cable
-    FOR EACH ROW EXECUTE PROCEDURE obj_insert_stamp();
+CREATE TRIGGER cable_insert_stamp BEFORE INSERT ON fibre_cable
+    FOR EACH ROW EXECUTE PROCEDURE cable_insert_stamp();
 	
 CREATE TRIGGER obj_update_stamp BEFORE UPDATE ON fibre_cable
     FOR EACH ROW EXECUTE PROCEDURE obj_update_stamp();
